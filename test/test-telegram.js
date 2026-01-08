@@ -1,4 +1,4 @@
-const { sendMessage } = require('./src/services/telegram');
+const { sendMessage } = require('../src/services/telegram');
 
 (async () => {
   console.log('Sending test message...');

@@ -1,11 +1,9 @@
 const axios = require('axios');
 const logger = require('./logger');
 
-// Gamma API base
 const GAMMA_API = 'https://gamma-api.polymarket.com';
 const CLOB_API = 'https://clob.polymarket.com';
 
-// Cache active markets (refresh every 5 min)
 let marketsCache = {
   data: [],
   lastUpdated: 0
@@ -34,7 +32,7 @@ async function fetchActiveMarkets() {
     marketsCache = {
       data: markets.map(m => ({
         id: m.id,
-        conditionId: m.condition_id || m.clob_token_ids?.[0]?.split('_')[0], // fallback
+        conditionId: m.condition_id || m.clob_token_ids?.[0]?.split('_')[0], 
         question: m.question || m.title,
         outcomes: m.outcomes || ['Yes', 'No'],
         volume: parseFloat(m.volume || 0),
@@ -49,7 +47,7 @@ async function fetchActiveMarkets() {
     return marketsCache.data;
   } catch (error) {
     logger.error('Failed to fetch Polymarket markets', { error: error.message });
-    return marketsCache.data; // return stale on error
+    return marketsCache.data; 
   }
 }
 
@@ -79,7 +77,7 @@ async function getRecentTradesForWallet(wallet, minutes = 5) {
 
 async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
   const markets = await fetchActiveMarkets();
-  const recentTrades = await getRecentTradesForWallet(whaleWallet, 10);
+  const recentTrades = await getRecentTradesForWallet(whaleWallet, 120);
 
   if (recentTrades.length === 0) {
     return {
@@ -90,7 +88,6 @@ async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
     };
   }
 
-  // Find best match by amount similarity and market volume
   let bestMatch = null;
   let highestScore = 0;
 
@@ -103,16 +100,16 @@ async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
       m.id === trade.market ||
       m.conditionId === trade.condition_id
     );
-
+                      
     if (!market) continue;
 
-    const volumeFactor = Math.min(market.volume / 1e7, 1); // normalize
+    const volumeFactor = Math.min(market.volume / 1e7, 1); 
     const score = amountMatch * 0.7 + volumeFactor * 0.3;
 
     if (score > highestScore) {
       highestScore = score;
       const isYes = trade.side === 'buy' && trade.outcome === 'YES' || 
-                    trade.token_id?.endsWith('_YES');
+      trade.token_id?.endsWith('_YES');
       bestMatch = {
         marketTitle: market.question,
         outcome: isYes ? 'YES' : 'NO',
@@ -136,3 +133,4 @@ module.exports = {
   getRecentTradesForWallet,
   enrichWhaleAlert
 };
+

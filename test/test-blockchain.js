@@ -44,16 +44,16 @@ async function runBlockchainTest() {
 
   setTimeout(async () => {
     await mockContract.emitTransfer(
-      '0xWhale11111111111111111111111111111111111',
+      '0x2fEb36d9f5bC8d9aE78f4C1d8B52eB1C4d9E2B8E3',
       '0xc5d563a36ae78145c45a50134d48a1215220f80a',
       '14000'  // $15,000 — should trigger if threshold ≤15000
     );
 
     setTimeout(async () => {
       await mockContract.emitTransfer(
-        '0xSmall22222222222222222222222222222222222',
+        '0x006cc834cc092684f1b56626e23bedb3835c16ea',
         '0xc5d563a36ae78145c45a50134d48a1215220f80a',
-        '6005'      // $5 — should NOT trigger
+        '100000'      // $5 — should NOT trigger
       );
 
       setTimeout(async () => {

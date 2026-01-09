@@ -32,22 +32,17 @@ async function analyzeWhale(whaleWallet, amountUsd, txHash) {
 
   // 2. Fresh wallet check — paramount for insiders
   let isFresh = false;
-  if (process.env.TEST_MODE === 'true') {
-    isFresh = true; // Assume fresh in test mode for positive testing
-    reasons.push('TEST MODE: Assuming fresh wallet for simulation');
-  } else {
-    try {
-      const provider = getProvider();
-      const txCount = await provider.getTransactionCount(whaleWallet);
-      if (txCount < RULES.freshWalletTxCountThreshold) {
-        isFresh = true;
-        reasons.push(`Fresh wallet detected (only ${txCount} txs) — strong insider signal`);
-      } else {
-        reasons.push(`Established wallet (${txCount} txs)`);
-      }
-    } catch (err) {
-      reasons.push('Could not check wallet age (RPC error)');
+  try {
+    const provider = getProvider();
+    const txCount = await provider.getTransactionCount(whaleWallet);
+    if (txCount < RULES.freshWalletTxCountThreshold) {
+      isFresh = true;
+      reasons.push(`Fresh wallet detected (only ${txCount} txs) — strong insider signal`);
+    } else {
+      reasons.push(`Established wallet (${txCount} txs)`);
     }
+  } catch (err) {
+    reasons.push('Could not check wallet age (RPC error)');
   }
 
   if (isFresh) {

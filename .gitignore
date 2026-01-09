@@ -1,4 +1,8 @@
 node_modules/
+test/
 .env
 logs/
 .vscode/
+.DS_Store
+
+

@@ -51,14 +51,12 @@ async function fetchActiveMarkets() {
   }
 }
 
-async function getRecentTradesForWallet(wallet, minutes = 5) {
+async function getRecentTradesForWallet(wallet, minutes = 120) {
   if (!wallet) return [];
 
   try {
     const response = await axios.get(`${CLOB_API}/trades`, {
       params: {
-        maker: wallet.toLowerCase(),
-        taker: wallet.toLowerCase(),
         limit: 20
       },
       timeout: 8000
@@ -66,25 +64,34 @@ async function getRecentTradesForWallet(wallet, minutes = 5) {
 
     const trades = response.data.data || response.data;
 
-    // Filter recent
     const cutoff = Date.now() - (minutes * 60 * 1000);
-    return trades.filter(t => new Date(t.timestamp).getTime() > cutoff);
+    return trades.filter(t => {
+      const ts = new Date(t.timestamp || t.created_at).getTime();
+      return ts > cutoff && (
+        t.maker?.toLowerCase() === wallet.toLowerCase() ||
+        t.taker?.toLowerCase() === wallet.toLowerCase()
+      );
+    });
   } catch (error) {
-    logger.warn('Failed to fetch recent trades', { wallet: wallet.slice(0,10), error: error.message });
+    if (error.response?.status === 401) {
+      logger.warn('CLOB trades require auth — using public fallback');
+    } else {
+      logger.warn('Failed to fetch recent trades', { error: error.message });
+    }
     return [];
   }
 }
 
 async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
   const markets = await fetchActiveMarkets();
-  const recentTrades = await getRecentTradesForWallet(whaleWallet, 120);
+  const recentTrades = await getRecentTradesForWallet(whaleWallet);
 
   if (recentTrades.length === 0) {
     return {
       marketTitle: null,
       outcome: null,
       confidence: 'low',
-      note: 'No recent trades found for wallet'
+      note: 'No recent trades found'
     };
   }
 
@@ -100,16 +107,16 @@ async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
       m.id === trade.market ||
       m.conditionId === trade.condition_id
     );
-                      
+
     if (!market) continue;
 
-    const volumeFactor = Math.min(market.volume / 1e7, 1); 
+    const volumeFactor = Math.min(market.volume / 1e7, 1);
     const score = amountMatch * 0.7 + volumeFactor * 0.3;
 
     if (score > highestScore) {
       highestScore = score;
       const isYes = trade.side === 'buy' && trade.outcome === 'YES' || 
-      trade.token_id?.endsWith('_YES');
+                    trade.token_id?.endsWith('_YES');
       bestMatch = {
         marketTitle: market.question,
         outcome: isYes ? 'YES' : 'NO',
@@ -133,4 +140,3 @@ module.exports = {
   getRecentTradesForWallet,
   enrichWhaleAlert
 };
-

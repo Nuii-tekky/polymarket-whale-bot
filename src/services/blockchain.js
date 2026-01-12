@@ -1,210 +1,147 @@
 require("dotenv").config();
 const { ethers } = require("ethers");
-const { sendMessage } = require("./telegram");
-const logger = require("./logger");
-const { enrichWhaleAlert } = require("./polymarket");
-const { analyzeTrade } = require("../core/analyzer"); 
+const WebSocket = require("ws");
+const logger = require("../utils/logger");
+const { getMarketByAssetId } = require("./polymarket");
+const { analyzeTrade } = require("../core/analyzer");
 const { executeMirror } = require("../core/executor");
+const { sendMessage } = require("./telegram");
 
-const USDC_ADDRESS = "0x41E94Eb019C0762f9Bfcf9Fb1E58725BfB0e7582"; // Amoy USDC
+const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const USDC_DECIMALS = 6;
 
-const POLYMARKET_EXCHANGES = [
-  "0xc5d563a36ae78145c45a50134d48a1215220f80a",
-  "0x4bfb41d5b3570defd03c39a9a4d8de6bd8b8982e",
-].map((addr) => addr.toLowerCase());
-
-const CONFIG = {
-  thresholdUsd: parseFloat(process.env.WHALE_TRANSFER_THRESHOLD_USD || "10000"),
-  minAmountUsd: parseFloat(process.env.WHALE_MIN_AMOUNT_USD || "0.01"),
-  ignoreWallets: (process.env.IGNORE_WALLETS || "")
-    .split(",")
-    .map((w) => w.trim().toLowerCase())
-    .filter((w) => w.length > 0),
-  alertOnOutflow: process.env.ALERT_ON_OUTFLOW?.toLowerCase() === "true",
-  watchDurationMs: 24 * 60 * 60 * 1000, // 24 hours
-  pollIntervalMs: 30000, // 30 seconds
-};
+const PROXY_FACTORIES = [
+  "0xaB45c5A4B0c941a2F231C04C3f49182E1A254052", // Polymarket Proxy Factory
+  "0xaacfeea03eb1561c4e67d661e40682bd20e3541b"  // Gnosis Safe Factory
+].map(a => a.toLowerCase());
 
 let provider;
 let watchedWallets = new Map(); 
+let ws; // Persistent reference for cleanup
+let heartbeatInterval;
 
-function getProvider() {
-  if (provider) return provider;
-
-  const rpcUrl =
-    process.env.NETWORK === "mainnet"
-      ? process.env.ALCHEMY_MAINNET_WSS
-      : process.env.ALCHEMY_AMOY_WSS;
-
-  if (!rpcUrl) {
-    logger.error("Missing RPC URL", { network: process.env.NETWORK });
-    process.exit(1);
-  }
-
+async function getProxyOwner(address) {
   try {
-    provider = new ethers.WebSocketProvider(rpcUrl);
+    const contract = new ethers.Contract(address, [
+      "function getOwners() view returns (address[])", // Gnosis
+      "function owner() view returns (address)"       // Custom Proxy
+    ], provider);
 
-    const waitForReady = () => new Promise((resolve) => {
-      const check = () => {
-        if (provider._websocket && provider._websocket.readyState === 1) {
-          resolve();
-        } else {
-          setTimeout(check, 50);
-        }
-      };
-      check();
-    });
-
-    waitForReady().then(() => {
-      provider.on("error", (err) =>
-        logger.error("WebSocket error", { msg: err.message })
-      );
-
-      provider.on("close", () => {
-        logger.warn("WebSocket disconnected — reconnecting in 5s");
-        setTimeout(() => {
-          provider = null;
-        }, 5000);
-      });
-    }).catch((err) => {
-      logger.error("WebSocket initialization failed", { error: err.message });
-    });
-
-    logger.info("Connected to Polygon", {
-      network: process.env.NETWORK || "amoy",
-    });
-  } catch (err) {
-    logger.error("Failed to create WebSocketProvider", { error: err.message });
-    process.exit(1);
+    try {
+      const owners = await contract.getOwners();
+      return owners[0].toLowerCase();
+    } catch {
+      const owner = await contract.owner();
+      return owner.toLowerCase();
+    }
+  } catch (e) {
+    return address.toLowerCase(); 
   }
+}
 
-  return provider;
+function connectTradeSocket() {
+  // Cleanup existing socket and intervals before reconnecting
+  if (ws) {
+    ws.removeAllListeners();
+    ws.terminate();
+  }
+  if (heartbeatInterval) clearInterval(heartbeatInterval);
+
+  ws = new WebSocket("wss://clob.polymarket.com/ws");
+  let isAlive = true;
+
+  ws.on("open", () => {
+    logger.info("Polymarket RTDS Connected");
+    isAlive = true;
+    
+    ws.send(JSON.stringify({
+      type: "subscribe",
+      topic: "activity",
+      event_type: "trades"
+    }));
+
+    // Setup Heartbeat to prevent zombie connections
+    heartbeatInterval = setInterval(() => {
+      if (isAlive === false) {
+        logger.warn("WS connection dead, terminating...");
+        return ws.terminate();
+      }
+      isAlive = false;
+      ws.ping();
+    }, 30000); 
+  });
+
+  ws.on("pong", () => {
+    isAlive = true;
+  });
+
+  ws.on("message", async (data) => {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.topic === "activity" && msg.type === "trades") {
+        const trade = msg.payload;
+        const maker = trade.maker.toLowerCase();
+        const taker = trade.taker.toLowerCase();
+
+        const target = watchedWallets.has(maker) ? maker : (watchedWallets.has(taker) ? taker : null);
+        if (target) {
+          logger.info(`🎯 Signal! Insider ${target} traded.`);
+          await handleTradeSignal(trade, target);
+        }
+      }
+    } catch (err) {
+      logger.error("Error parsing WS message", { error: err.message });
+    }
+  });
+
+  ws.on("error", (err) => {
+    logger.error("WebSocket error occurred", { error: err.message });
+  });
+
+  ws.on("close", () => {
+    logger.warn("Polymarket RTDS Closed. Reconnecting in 5s...");
+    clearInterval(heartbeatInterval);
+    setTimeout(connectTradeSocket, 5000);
+  });
+}
+
+async function handleTradeSignal(trade, wallet) {
+  const market = await getMarketByAssetId(trade.asset_id);
+  const tradeData = {
+    amountUsd: parseFloat(trade.size) * parseFloat(trade.price),
+    side: trade.side,
+    marketName: market.title,
+    outcome: market.outcome,
+    assetId: trade.asset_id,
+    price: trade.price
+  };
+
+  const analysis = await analyzeTrade(tradeData, wallet);
+  if (analysis.shouldMirror) {
+    await executeMirror(analysis, wallet, tradeData.amountUsd, tradeData);
+    await sendMessage(`✅ <b>Mirrored Insider</b>\nWallet: <code>${wallet}</code>\nMarket: ${market.title}`);
+  }
 }
 
 async function startWhaleMonitoring() {
-  const prov = getProvider();
+  provider = new ethers.WebSocketProvider(process.env.ALCHEMY_POLYGON_WSS);
+  const usdc = new ethers.Contract(USDC_ADDRESS, ["event Transfer(address indexed from, address indexed to, uint256 value)"], provider);
 
-  const usdc = new ethers.Contract(USDC_ADDRESS, [
-    "event Transfer(address indexed from, address indexed to, uint256 value)",
-  ], prov);
+  connectTradeSocket();
 
-  logger.info("Whale monitoring STARTED", CONFIG);
+  usdc.on("Transfer", async (from, to, value) => {
+    const amount = parseFloat(ethers.formatUnits(value, USDC_DECIMALS));
+    if (amount < 5000) return; 
 
-  await sendMessage("✅ Bot is LIVE! Watching for huge deposits → monitoring wallets for trades.");
+    const owner = await getProxyOwner(to);
+    const txCount = await provider.getTransactionCount(owner);
 
-  usdc.on("Transfer", (from, to, value, event) => {
-    (async () => {
-      try {
-        const amountUsd = parseFloat(ethers.formatUnits(value, USDC_DECIMALS));
-
-        logger.info("RAW USDC TRANSFER EVENT RECEIVED", {
-          from,
-          to,
-          amountUsd,
-          txHash: event.transactionHash,
-          block: event.blockNumber
-        });
-
-        if (amountUsd < CONFIG.minAmountUsd) return;
-
-        const fromLower = from.toLowerCase();
-        const toLower = to.toLowerCase();
-
-        if (
-          CONFIG.ignoreWallets.includes(fromLower) ||
-          CONFIG.ignoreWallets.includes(toLower)
-        ) {
-          return;
-        }
-
-        const isToPM = POLYMARKET_EXCHANGES.includes(toLower);
-        const isFromPM = POLYMARKET_EXCHANGES.includes(fromLower);
-
-        if (!isToPM && !isFromPM) return;
-
-        if (amountUsd < CONFIG.thresholdUsd) return;
-
-        const direction = isToPM ? "INTO" : "OUT OF";
-        const whaleWallet = isToPM ? from : to;
-
-        watchedWallets.set(whaleWallet.toLowerCase(), {
-          startTime: Date.now(),
-          depositAmount: amountUsd
-        });
-
-        logger.info("Added wallet to watchlist", { wallet: whaleWallet, deposit: amountUsd });
-
-        await sendMessage(`Huge ${direction} deposit detected from ${whaleWallet} ($${amountUsd}) — monitoring for trades!`);
-
-        let enrichment = { note: "No context" };
-        try {
-          enrichment = await enrichWhaleAlert(whaleWallet, amountUsd, event.transactionHash);
-        } catch (err) {
-          logger.warn("Enrichment failed", { error: err.message });
-        }
-
-        const text = `
-🐳 <b>WHALE DEPOSIT DETECTED</b> 🐳
-
-Amount: $${amountUsd.toLocaleString()}
-Direction: ${direction} Polymarket
-Wallet: <code>${whaleWallet}</code>
-${enrichment.marketTitle ? `Market: ${enrichment.marketTitle}\nBetting on: ${enrichment.outcome || "Unknown"}` : enrichment.note}
-Tx: <a href="https://polygonscan.com/tx/${event.transactionHash}">View</a>
-        `.trim();
-
-        await sendMessage(text);
-      } catch (err) {
-        logger.error("Deposit detection error", { error: err.message });
-      }
-    })();
-  });
-
-  setInterval(async () => {
-    const now = Date.now();
-    for (const [wallet, data] of watchedWallets) {
-      if (now - data.startTime > CONFIG.watchDurationMs) {
-        watchedWallets.delete(wallet);
-        logger.info("Removed expired wallet from watchlist", { wallet });
-        continue;
-      }
-
-      const trades = await getRecentTradesForWallet(wallet, 5).catch(() => []);
-      if (trades.length > 0) {
-        const latestTrade = trades[0]; 
-        const analysis = await analyzeTrade(latestTrade, wallet);
-
-        let decisionText = `
-<b>Trade Detected from Watched Wallet</b>
-Amount: $${latestTrade.amountUsd}
-Side: ${latestTrade.side}
-Market: ${latestTrade.market || "Unknown"}
-Outcome: ${latestTrade.outcome || "Unknown"}
-Decision: ${analysis.shouldMirror ? "MIRROR" : "HOLD"}
-Confidence: ${analysis.score}
-Mirror %: ${analysis.mirrorPercent > 0 ? (analysis.mirrorPercent * 100).toFixed(1) + "%" : "0%"}
-Reason: ${analysis.reasons}
-        `.trim();
-
-        await sendMessage(decisionText);
-
-        if (analysis.shouldMirror) {
-          const execResult = await executeMirror(analysis, wallet, latestTrade.amountUsd, latestTrade);
-          if (execResult.success) {
-            logger.info("Mirror executed", { txHash: execResult.txHash });
-            await sendMessage(`✅ Copied trade from ${wallet.slice(0,8)}...`);
-          } else {
-            logger.warn("Mirror failed", { reason: execResult.reason });
-          }
-        }
-
-        watchedWallets.delete(wallet); 
-      }
+    if (txCount < 10) {
+      watchedWallets.set(to.toLowerCase(), { owner, deposit: amount, time: Date.now() });
+      logger.info(`🔥 Insider Watchlist: ${to} (Owner: ${owner})`);
+      await sendMessage(`🕵️ <b>New Insider Spotted</b>\nFresh wallet funded with $${amount.toLocaleString()}.\nAddress: <code>${to}</code>`);
     }
-  }, CONFIG.pollIntervalMs);
-
-  logger.info("USDC whale monitoring ACTIVE");
+  });
 }
 
-module.exports = { startWhaleMonitoring, getProvider };
+module.exports = { startWhaleMonitoring, getProvider: () => provider };

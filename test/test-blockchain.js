@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
-const logger = require('../src/services/logger');
+const logger = require('../src/utils/logger');
 const { startWhaleMonitoring } = require('../src/services/blockchain');
 
 

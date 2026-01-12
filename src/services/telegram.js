@@ -20,7 +20,7 @@ if (token && chatId) {
   process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
   sendMessage = async (text) => {
-    const logger = require('./logger');
+    const logger = require('../utils/logger');
 
     try {
       await bot.telegram.sendMessage(chatId, text, { parse_mode: 'HTML' });

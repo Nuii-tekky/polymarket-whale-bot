@@ -1,4 +1,4 @@
-const logger = require('../services/logger');
+const logger = require('../utils/logger');
 const { getProvider } = require('../services/blockchain');
 const { ethers } = require('ethers');
 
@@ -16,7 +16,6 @@ async function analyzeTrade(tradeInfo, wallet) {
   let score = 0;
   let reasons = [];
 
-  // 1. Trade size score (the "insane figure" signal)
   if (tradeInfo.amountUsd >= 500000) {
     score += 0.4;
     reasons.push('Very large trade ($500K+)');
@@ -32,7 +31,6 @@ async function analyzeTrade(tradeInfo, wallet) {
     };
   }
 
-  // 2. Fresh wallet check — paramount for prospective insiders
   let isFresh = false;
   try {
     const provider = getProvider();
@@ -45,7 +43,7 @@ async function analyzeTrade(tradeInfo, wallet) {
     }
   } catch (err) {
     logger.warn('RPC error checking wallet age', { error: err.message });
-    isFresh = true; // Fallback: Assume fresh on error to prioritize potential insiders
+    isFresh = true; 
     reasons.push('Could not check wallet age (RPC error) — assuming fresh');
   }
 
@@ -53,13 +51,10 @@ async function analyzeTrade(tradeInfo, wallet) {
     score += RULES.freshWalletBonusScore;
   }
 
-  // 3. Trade side bonus (buy = stronger insider signal)
   if (tradeInfo.side === 'BUY') {
     score += RULES.buySideBonus;
     reasons.push('Buy side detected (stronger signal)');
   }
-
-  // 4. Optional future: Prob shift, win rate, etc. (can add from API)
 
   const shouldMirror = score >= RULES.baseConfidenceThreshold;
   const mirrorPercent = shouldMirror ? Math.min(RULES.maxMirrorPercent, score * RULES.maxMirrorPercent) : 0;
@@ -72,7 +67,7 @@ async function analyzeTrade(tradeInfo, wallet) {
   };
 
   logger.info('Trade analysis complete', result);
-
+  console.log(result);
   return result;
 }
 

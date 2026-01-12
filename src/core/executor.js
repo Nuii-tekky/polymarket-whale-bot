@@ -1,98 +1,58 @@
+const { ClobClient, Side, OrderType } = require("@polymarket/clob-client");
 const { ethers } = require("ethers");
-const axios = require("axios");
-const logger = require("../services/logger");
+const logger = require("../utils/logger");
 const { sendMessage } = require("../services/telegram");
-const { getProvider } = require("../services/blockchain");
 
-const CLOB_API = "https://clob.polymarket.com";
-const VAULT_ABI = [
-  "function executeTrade(address to, uint256 amount) external",
-  "function balanceOfUSDC() view returns (uint256)",
-];
+async function executeMirror(analysis, whaleWallet, amountUsd, tradeData) {
+    if (!analysis.shouldMirror || !tradeData.assetId) return;
 
-async function executeMirror(analysis, whaleWallet, amountUsd, tradeInfo) {
-  if (!analysis.shouldMirror || !tradeInfo.outcome)
-    return { success: false, reason: "No mirror or outcome" };
+    try {
+        const client = new ClobClient(
+            "https://clob.polymarket.com",
+            137, // Polygon Mainnet
+            new ethers.Wallet(process.env.PRIVATE_KEY),
+            {
+                key: process.env.POLYMARKET_API_KEY,
+                secret: process.env.POLYMARKET_API_SECRET,
+                passphrase: process.env.POLYMARKET_API_PASSPHRASE,
+            },
+            parseInt(process.env.POLYMARKET_SIGNATURE_TYPE || "2"), 
+            process.env.VAULT_ADDRESS 
+        );
 
-  const provider = getProvider();
-  const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
-  const vault = new ethers.Contract(
-    process.env.VAULT_ADDRESS,
-    VAULT_ABI,
-    wallet
-  );
+        const baseSize = parseFloat(process.env.MAX_TRADE_SIZE || "100");
+        const tradeSize = parseFloat((baseSize * parseFloat(analysis.mirrorPercent)).toFixed(2));
 
-  try {
-    const balance = await vault.balanceOfUSDC();
-    const amount = balance
-      .mul(Math.floor(analysis.mirrorPercent * 100))
-      .div(100);
+        if (tradeSize < 1) return;
 
-    if (amount.eq(0)) return { success: false, reason: "Insufficient balance" };
+        logger.info(`🚀 [SDK] Placing Order: $${tradeSize} on ${tradeData.marketName}`);
 
-    // Get token ID for outcome
-    const tokenId = tradeInfo.market + "_" + tradeInfo.outcome;
+        const resp = await client.createAndPostOrder({
+            tokenID: tradeData.assetId,
+            price: parseFloat(tradeData.price),
+            size: tradeSize,
+            side: Side.BUY,
+        }, {
+            orderType: OrderType.FOK 
+        });
 
-    // Build order params
-    const order = {
-      token_id: tokenId,
-      price: tradeInfo.price || 0.5, // Use whale's price or current
-      size: ethers.formatUnits(amount, 6),
-      side: "buy",
-      type: "fok", // Fill or Kill
-    };
+        if (resp.success) {
+            await sendMessage(
+                `✅ **MIRROR SUCCESSFUL**\n` +
+                `Market: ${tradeData.marketName}\n` +
+                `Price: ${tradeData.price}\n` +
+                `Size: $${tradeSize}`
+            );
+            return { success: true, orderId: resp.orderID };
+        } else {
+            throw new Error(resp.errorMsg || "Order rejected by CLOB");
+        }
 
-    // Sign order (EIP-712)
-    const domain = {
-      name: "Polymarket CLOB",
-      version: "1",
-      chainId: 80002,
-      verifyingContract: "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8b8982e",
-    };
-    const types = {
-      Order: [
-        { name: "token_id", type: "string" },
-        { name: "price", type: "uint256" },
-        { name: "size", type: "uint256" },
-        { name: "side", type: "string" },
-        { name: "type", type: "string" },
-      ],
-    };
-    const signature = await wallet.signTypedData(domain, types, order);
-
-    // POST order to CLOB
-    const response = await axios.post(
-      `${CLOB_API}/order`,
-      {
-        ...order,
-        signature,
-      },
-      {
-        headers: {
-          "X-API-KEY": process.env.POLYMARKET_API_KEY,
-        },
-      }
-    );
-
-    if (response.status === 200) {
-      logger.info("Mirror executed", {
-        amount: ethers.formatUnits(amount, 6),
-        outcome: tradeInfo.outcome,
-      });
-      await sendMessage(
-        `✅ MIRROR EXECUTED\nAmount: $${ethers.formatUnits(amount, 6)} on ${
-          tradeInfo.outcome
-        }\nMarket: ${tradeInfo.market}\nTx: ${response.data.txHash}`
-      );
-      return { success: true, txHash: response.data.txHash };
-    } else {
-      return { success: false, reason: response.data.error };
+    } catch (err) {
+        const errorMsg = err.message || "Unknown CLOB error";
+        logger.error("Mirror Execution Failed", { error: errorMsg });
+        await sendMessage(`❌ **Mirror Failed**: ${errorMsg}`);
     }
-  } catch (err) {
-    logger.error("Mirror failed", { error: err.message });
-    await sendMessage(`❌ Mirror FAILED: ${err.message}`);
-    return { success: false, reason: err.message };
-  }
 }
 
 module.exports = { executeMirror };

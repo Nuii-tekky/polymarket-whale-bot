@@ -3,38 +3,40 @@ const { getProvider } = require('../services/blockchain');
 const { ethers } = require('ethers');
 
 const RULES = {
-  minDepositUsdForMirror: parseFloat(process.env.ANALYZER_MIN_DEPOSIT || '50000'),
+  minTradeUsdForMirror: parseFloat(process.env.ANALYZER_MIN_TRADE || '10000'), // Min trade size to consider
   freshWalletTxCountThreshold: parseInt(process.env.ANALYZER_FRESH_TX_THRESHOLD || '20'),
   baseConfidenceThreshold: parseFloat(process.env.ANALYZER_CONFIDENCE_THRESHOLD || '0.6'),
   maxMirrorPercent: parseFloat(process.env.ANALYZER_MAX_MIRROR_PCT || '0.15'),
   freshWalletBonusScore: 0.3,
+  tradeSizeBonus: 0.25,
+  buySideBonus: 0.2, 
 };
 
-async function analyzeWhale(whaleWallet, amountUsd, txHash) {
+async function analyzeTrade(tradeInfo, wallet) {
   let score = 0;
   let reasons = [];
 
-  // 1. Deposit size score
-  if (amountUsd >= 500000) {
+  // 1. Trade size score (the "insane figure" signal)
+  if (tradeInfo.amountUsd >= 500000) {
     score += 0.4;
-    reasons.push('Very large deposit ($500K+)');
-  } else if (amountUsd >= RULES.minDepositUsdForMirror) {
-    score += 0.25;
-    reasons.push('Large deposit (>$50K)');
+    reasons.push('Very large trade ($500K+)');
+  } else if (tradeInfo.amountUsd >= RULES.minTradeUsdForMirror) {
+    score += RULES.tradeSizeBonus;
+    reasons.push('Large trade (>$10K)');
   } else {
     return {
       shouldMirror: false,
       mirrorPercent: 0,
       score: 0,
-      reasons: 'Deposit too small for mirroring'
+      reasons: 'Trade too small for mirroring'
     };
   }
 
-  // 2. Fresh wallet check — paramount for insiders
+  // 2. Fresh wallet check — paramount for prospective insiders
   let isFresh = false;
   try {
     const provider = getProvider();
-    const txCount = await provider.getTransactionCount(whaleWallet);
+    const txCount = await provider.getTransactionCount(wallet);
     if (txCount < RULES.freshWalletTxCountThreshold) {
       isFresh = true;
       reasons.push(`Fresh wallet detected (only ${txCount} txs) — strong insider signal`);
@@ -42,14 +44,22 @@ async function analyzeWhale(whaleWallet, amountUsd, txHash) {
       reasons.push(`Established wallet (${txCount} txs)`);
     }
   } catch (err) {
-    reasons.push('Could not check wallet age (RPC error)');
+    logger.warn('RPC error checking wallet age', { error: err.message });
+    isFresh = true; // Fallback: Assume fresh on error to prioritize potential insiders
+    reasons.push('Could not check wallet age (RPC error) — assuming fresh');
   }
 
   if (isFresh) {
     score += RULES.freshWalletBonusScore;
   }
 
-  // 3. Future expansions (e.g., prob shift from enrichment)
+  // 3. Trade side bonus (buy = stronger insider signal)
+  if (tradeInfo.side === 'BUY') {
+    score += RULES.buySideBonus;
+    reasons.push('Buy side detected (stronger signal)');
+  }
+
+  // 4. Optional future: Prob shift, win rate, etc. (can add from API)
 
   const shouldMirror = score >= RULES.baseConfidenceThreshold;
   const mirrorPercent = shouldMirror ? Math.min(RULES.maxMirrorPercent, score * RULES.maxMirrorPercent) : 0;
@@ -57,13 +67,13 @@ async function analyzeWhale(whaleWallet, amountUsd, txHash) {
   const result = {
     shouldMirror,
     mirrorPercent,
-    score,
+    score: score.toFixed(2),
     reasons: reasons.join(' | ')
   };
 
-  logger.info('Analysis complete', result);
+  logger.info('Trade analysis complete', result);
 
   return result;
 }
 
-module.exports = { analyzeWhale };
+module.exports = { analyzeTrade };

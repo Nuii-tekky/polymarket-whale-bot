@@ -1,19 +1,22 @@
-const axios = require('axios');
-const logger = require('./logger');
+const axios = require("axios");
+const logger = require("./logger");
 
-const GAMMA_API = 'https://gamma-api.polymarket.com';
-const CLOB_API = 'https://clob.polymarket.com';
+const GAMMA_API = "https://gamma-api.polymarket.com";
+const CLOB_API = "https://clob.polymarket.com";
 
 let marketsCache = {
   data: [],
-  lastUpdated: 0
+  lastUpdated: 0,
 };
 
-const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const CACHE_TTL = 5 * 60 * 1000; 
 
 async function fetchActiveMarkets() {
   const now = Date.now();
-  if (marketsCache.data.length > 0 && now - marketsCache.lastUpdated < CACHE_TTL) {
+  if (
+    marketsCache.data.length > 0 &&
+    now - marketsCache.lastUpdated < CACHE_TTL
+  ) {
     return marketsCache.data;
   }
 
@@ -22,42 +25,60 @@ async function fetchActiveMarkets() {
       params: {
         active: true,
         closed: false,
-        limit: 200
+        limit: 200,
       },
-      timeout: 10000
+      timeout: 10000,
     });
 
     const markets = response.data.data || response.data;
 
     marketsCache = {
-      data: markets.map(m => ({
+      data: markets.map((m) => ({
         id: m.id,
-        conditionId: m.condition_id || m.clob_token_ids?.[0]?.split('_')[0], 
+        conditionId: m.condition_id || m.clob_token_ids?.[0]?.split("_")[0],
         question: m.question || m.title,
-        outcomes: m.outcomes || ['Yes', 'No'],
+        outcomes: m.outcomes || ["Yes", "No"],
         volume: parseFloat(m.volume || 0),
         liquidity: parseFloat(m.liquidity || 0),
         yesPrice: parseFloat(m.outcome_prices?.[0] || m.yes_price || 0),
-        noPrice: parseFloat(m.outcome_prices?.[1] || m.no_price || 1)
+        noPrice: parseFloat(m.outcome_prices?.[1] || m.no_price || 1),
       })),
-      lastUpdated: now
+      lastUpdated: now,
     };
 
-    logger.info('Polymarket markets cached', { count: marketsCache.data.length });
+    logger.info("Polymarket markets cached", {
+      count: marketsCache.data.length,
+    });
     return marketsCache.data;
   } catch (error) {
-    logger.error('Failed to fetch Polymarket markets', { error: error.message });
-    return marketsCache.data; 
+    logger.error("Failed to fetch Polymarket markets", {
+      error: error.message,
+    });
+    return marketsCache.data;
   }
 }
 
 async function getRecentTradesForWallet(wallet, minutes = 120) {
   if (!wallet) return [];
 
+  const apiKey = process.env.POLYMARKET_API_KEY;
+  const apiSecret = process.env.POLYMARKET_API_SECRET;
+  const passphrase = process.env.POLYMARKET_API_PASSPHRASE || '';
+
+  if (!apiKey || !apiSecret) {
+    logger.warn('Polymarket API key/secret missing — using public fallback');
+    return []; // Fallback to no trades
+  }
+
   try {
     const response = await axios.get(`${CLOB_API}/trades`, {
       params: {
+        maker: wallet.toLowerCase(),
+        taker: wallet.toLowerCase(),
         limit: 20
+      },
+      headers: {
+        'X-API-KEY': apiKey,
       },
       timeout: 8000
     });
@@ -65,19 +86,18 @@ async function getRecentTradesForWallet(wallet, minutes = 120) {
     const trades = response.data.data || response.data;
 
     const cutoff = Date.now() - (minutes * 60 * 1000);
-    return trades.filter(t => {
+    const filtered = trades.filter(t => {
       const ts = new Date(t.timestamp || t.created_at).getTime();
       return ts > cutoff && (
         t.maker?.toLowerCase() === wallet.toLowerCase() ||
         t.taker?.toLowerCase() === wallet.toLowerCase()
       );
     });
+
+    logger.info('Found recent trades', { count: filtered.length, wallet: wallet.slice(0,10) });
+    return filtered;
   } catch (error) {
-    if (error.response?.status === 401) {
-      logger.warn('CLOB trades require auth — using public fallback');
-    } else {
-      logger.warn('Failed to fetch recent trades', { error: error.message });
-    }
+    logger.warn('Failed to fetch authenticated trades', { error: error.message });
     return [];
   }
 }
@@ -90,8 +110,8 @@ async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
     return {
       marketTitle: null,
       outcome: null,
-      confidence: 'low',
-      note: 'No recent trades found'
+      confidence: "low",
+      note: "No recent trades found",
     };
   }
 
@@ -102,41 +122,45 @@ async function enrichWhaleAlert(whaleWallet, amountUsd, txHash) {
     const tradeAmount = parseFloat(trade.usdc_size || trade.amount || 0);
     const amountMatch = 1 - Math.abs(tradeAmount - amountUsd) / amountUsd;
 
-    const market = markets.find(m => 
-      m.conditionId === trade.market || 
-      m.id === trade.market ||
-      m.conditionId === trade.condition_id
+    const market = markets.find(
+      (m) =>
+        m.conditionId === trade.market ||
+        m.id === trade.market ||
+        m.conditionId === trade.condition_id
     );
 
     if (!market) continue;
 
     const volumeFactor = Math.min(market.volume / 1e7, 1);
-    const score = amountMatch * 0.7 + volumeFactor * 0.3;
+    score = amountMatch * 0.7 + volumeFactor * 0.3;
 
     if (score > highestScore) {
       highestScore = score;
-      const isYes = trade.side === 'buy' && trade.outcome === 'YES' || 
-                    trade.token_id?.endsWith('_YES');
+      const isYes =
+        (trade.side === "buy" && trade.outcome === "YES") ||
+        trade.token_id?.endsWith("_YES");
       bestMatch = {
         marketTitle: market.question,
-        outcome: isYes ? 'YES' : 'NO',
-        confidence: score > 0.8 ? 'high' : 'medium',
+        outcome: isYes ? "YES" : "NO",
+        confidence: score > 0.8 ? "high" : "medium",
         tradeAmount,
-        prob: isYes ? market.yesPrice : market.noPrice
+        prob: isYes ? market.yesPrice : market.noPrice,
       };
     }
   }
 
-  return bestMatch || {
-    marketTitle: null,
-    outcome: null,
-    confidence: 'low',
-    note: 'No strong market match'
-  };
+  return (
+    bestMatch || {
+      marketTitle: null,
+      outcome: null,
+      confidence: "low",
+      note: "No strong market match",
+    }
+  );
 }
 
 module.exports = {
   fetchActiveMarkets,
   getRecentTradesForWallet,
-  enrichWhaleAlert
+  enrichWhaleAlert,
 };

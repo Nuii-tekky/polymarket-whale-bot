@@ -64,7 +64,7 @@ TELEGRAM_BOT_TOKEN=your_token
 TELEGRAM_CHAT_ID=your_id
 
 🧪 Testing
-```
+```bash
 The repository includes a comprehensive test suite covering critical edge cases:
 
 Unit Tests: Heuristic scoring and market resolution.

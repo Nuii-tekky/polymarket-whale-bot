@@ -42,44 +42,56 @@ async function getMarketByAssetId(assetId) {
   }
 }
 
+let activeFetchPromise = null; // The "Flight Lock"
 
 async function fetchActiveMarkets() {
   const now = Date.now();
+  
+  // 1. Check if we have valid cached data
   if (marketsCache.data.length > 0 && now - marketsCache.lastUpdated < CACHE_TTL) {
     return marketsCache.data;
   }
 
-  try {
-    const response = await axios.get(`${GAMMA_API}/markets`, {
-      params: { active: true, closed: false, limit: 200 },
-      timeout: 10000,
-    });
-
-    const markets = response.data.data || response.data;
-
-    marketsCache = {
-      data: markets.map((m) => ({
-        id: m.id,
-        conditionId: m.condition_id || m.clobTokenIds?.[0],
-        question: m.question || m.title,
-        outcomes: m.outcomes || ["Yes", "No"],
-        volume: parseFloat(m.volume || 0),
-        liquidity: parseFloat(m.liquidity || 0),
-        yesPrice: parseFloat(m.outcomePrices?.[0] || 0),
-        noPrice: parseFloat(m.outcomePrices?.[1] || 0),
-        clobTokenIds: m.clobTokenIds
-      })),
-      lastUpdated: now,
-    };
-
-    logger.info("Polymarket markets cached", { count: marketsCache.data.length });
-    return marketsCache.data;
-  } catch (error) {
-    logger.error("Failed to fetch Polymarket markets", { error: error.message });
-    return marketsCache.data;
+  if (activeFetchPromise) {
+    return activeFetchPromise;
   }
-}
 
+  // 3. Create the promise and store it in the lock
+  activeFetchPromise = (async () => {
+    try {
+      const response = await axios.get(`${GAMMA_API}/markets`, {
+        params: { active: true, closed: false, limit: 200 },
+        timeout: 10000,
+      });
+
+      const markets = response.data.data || response.data;
+      marketsCache = {
+        data: markets.map((m) => ({
+          id: m.id,
+          conditionId: m.condition_id || m.clobTokenIds?.[0],
+          question: m.question || m.title,
+          outcomes: m.outcomes || ["Yes", "No"],
+          volume: parseFloat(m.volume || 0),
+          liquidity: parseFloat(m.liquidity || 0),
+          yesPrice: parseFloat(m.outcomePrices?.[0] || 0),
+          noPrice: parseFloat(m.outcomePrices?.[1] || 0),
+          clobTokenIds: m.clobTokenIds
+        })),
+        lastUpdated: Date.now(),
+      };
+
+      logger.info("Polymarket markets cached", { count: marketsCache.data.length });
+      return marketsCache.data;
+    } catch (error) {
+      logger.error("Failed to fetch Polymarket markets", { error: error.message });
+      return marketsCache.data; 
+    } finally {
+      activeFetchPromise = null; 
+    }
+  })();
+
+  return activeFetchPromise;
+}
 
 async function getRecentTradesForWallet(wallet, minutes = 120) {
   if (!wallet) return [];

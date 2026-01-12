@@ -9,7 +9,7 @@ async function executeMirror(analysis, whaleWallet, amountUsd, tradeData) {
     try {
         const client = new ClobClient(
             "https://clob.polymarket.com",
-            137, // Polygon Mainnet
+            137, 
             new ethers.Wallet(process.env.PRIVATE_KEY),
             {
                 key: process.env.POLYMARKET_API_KEY,

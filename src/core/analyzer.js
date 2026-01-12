@@ -1,6 +1,5 @@
 const logger = require('../utils/logger');
 const { getProvider } = require('../services/blockchain');
-const { ethers } = require('ethers');
 
 const RULES = {
   minTradeUsdForMirror: parseFloat(process.env.ANALYZER_MIN_TRADE || '10000'), // Min trade size to consider

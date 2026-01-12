@@ -11,20 +11,34 @@ const USDC_ADDRESS = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174";
 const USDC_DECIMALS = 6;
 
 const PROXY_FACTORIES = [
-  "0xaB45c5A4B0c941a2F231C04C3f49182E1A254052", // Polymarket Proxy Factory
-  "0xaacfeea03eb1561c4e67d661e40682bd20e3541b"  // Gnosis Safe Factory
+  "0xaB45c5A4B0c941a2F231C04C3f49182E1A254052", 
+  "0xaacfeea03eb1561c4e67d661e40682bd20e3541b"
 ].map(a => a.toLowerCase());
 
 let provider;
 let watchedWallets = new Map(); 
-let ws; // Persistent reference for cleanup
+let ws; 
 let heartbeatInterval;
+
+// Memory Management & Expiration Alert
+setInterval(async () => {
+  const now = Date.now();
+  const cutoff = 48 * 60 * 60 * 1000; 
+  
+  for (const [address, data] of watchedWallets.entries()) {
+    if (now - data.time > cutoff) {
+      watchedWallets.delete(address);
+      logger.info(`🧹 Expired: ${address}`);
+      await sendMessage(`⏱ <b>Watchlist Expired</b>\nWallet: <code>${address}</code>\nRemoved after 48h of inactivity.`);
+    }
+  }
+}, 3600000); // Check hourly
 
 async function getProxyOwner(address) {
   try {
     const contract = new ethers.Contract(address, [
-      "function getOwners() view returns (address[])", // Gnosis
-      "function owner() view returns (address)"       // Custom Proxy
+      "function getOwners() view returns (address[])", 
+      "function owner() view returns (address)"       
     ], provider);
 
     try {
@@ -40,7 +54,6 @@ async function getProxyOwner(address) {
 }
 
 function connectTradeSocket() {
-  // Cleanup existing socket and intervals before reconnecting
   if (ws) {
     ws.removeAllListeners();
     ws.terminate();
@@ -60,7 +73,6 @@ function connectTradeSocket() {
       event_type: "trades"
     }));
 
-    // Setup Heartbeat to prevent zombie connections
     heartbeatInterval = setInterval(() => {
       if (isAlive === false) {
         logger.warn("WS connection dead, terminating...");
@@ -71,9 +83,7 @@ function connectTradeSocket() {
     }, 30000); 
   });
 
-  ws.on("pong", () => {
-    isAlive = true;
-  });
+  ws.on("pong", () => { isAlive = true; });
 
   ws.on("message", async (data) => {
     try {

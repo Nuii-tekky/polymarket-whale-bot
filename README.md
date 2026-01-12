@@ -52,6 +52,7 @@ npm install
 ### 3.
 
 # Network
+```bash
 ALCHEMY_POLYGON_WSS=wss://[polygon-mainnet.g.alchemy.com/v2/your-key](https://polygon-mainnet.g.alchemy.com/v2/your-key)
 
 # Polymarket Credentials
@@ -62,9 +63,10 @@ POLYMARKET_PASSPHRASE=your_passphrase
 # Telegram
 TELEGRAM_BOT_TOKEN=your_token
 TELEGRAM_CHAT_ID=your_id
+```
 
 🧪 Testing
-```bash
+
 The repository includes a comprehensive test suite covering critical edge cases:
 
 Unit Tests: Heuristic scoring and market resolution.
@@ -73,7 +75,7 @@ Stress Tests: Simulates 100 simultaneous whale deposits to verify Flight Locking
 
 Integration Tests: Checksum sensitivity for wallet addresses.
 
-```
+
 
 ```bash
 # Run all tests
